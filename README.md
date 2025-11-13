@@ -169,3 +169,9 @@ Upsert realized_pnl_by_symbol with realized_qty and realized_pnl deltas
 Idempotency:
 Worker locks the trade row FOR UPDATE; if processed_at is already set, it skips
 On success, sets processed_at = now()
+
+
+Deployment link:
+Fe: https://fundtec-assignment-r6nq.vercel.app/
+Be: https://fundtec-assignment-backend.onrender.com
+Database : https://supabase.com/dashboard/project/gfrxrcyoroypxowlrzcp/sql/61b5cceb-35a7-4ba3-b63c-abf81a306bf8

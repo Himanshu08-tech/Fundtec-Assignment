@@ -1,128 +1,86 @@
-import { Pool } from 'pg';
-import { Kafka } from 'kafkajs';
 import 'dotenv/config';
+import { Kafka, logLevel } from 'kafkajs';
+import { pool } from './db.js';
+import { processBuy, processSell } from '../../shared/fifo.mjs'; // named imports from your ESM fifo
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// 1) Kafka optional switch
+const KAFKA_ENABLED = process.env.KAFKA_ENABLED !== 'false';
+if (!KAFKA_ENABLED) {
+  console.log('KAFKA_ENABLED=false → Worker exiting (Kafka optional mode).');
+  process.exit(0); // clean exit; backend runs direct mode safely
+}
 
+// 2) Build Kafka client config from env
 function buildKafka() {
-  const brokers = (process.env.KAFKA_BROKERS || 'localhost:29092').split(',');
-  const config = {
-    clientId: process.env.KAFKA_CLIENT_ID || 'portfolio-worker',
-    brokers
-  };
-  if (process.env.KAFKA_SSL === 'true') config.ssl = true;
-  if (process.env.KAFKA_SASL_USERNAME && process.env.KAFKA_SASL_PASSWORD) {
-    config.sasl = {
-      mechanism: process.env.KAFKA_SASL_MECHANISM || 'plain',
-      username: process.env.KAFKA_SASL_USERNAME,
-      password: process.env.KAFKA_SASL_PASSWORD
-    };
+  const brokers = (process.env.KAFKA_BROKERS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (brokers.length === 0) {
+    console.warn('KAFKA_BROKERS not provided → Worker exiting.');
+    process.exit(0);
   }
-  return new Kafka(config);
+
+  const sasl =
+    process.env.KAFKA_USERNAME && process.env.KAFKA_PASSWORD
+      ? {
+          mechanism: process.env.KAFKA_SASL_MECHANISM || 'scram-sha-256',
+          username: process.env.KAFKA_USERNAME,
+          password: process.env.KAFKA_PASSWORD
+        }
+      : undefined;
+
+  const ssl = process.env.KAFKA_SSL === 'true' ? { rejectUnauthorized: false } : undefined;
+
+  return new Kafka({
+    clientId: process.env.KAFKA_CLIENT_ID || 'portfolio-worker',
+    brokers,
+    ssl,
+    sasl,
+    logLevel: logLevel.WARN
+  });
 }
 
 const kafka = buildKafka();
-const consumer = kafka.consumer({ groupId: process.env.KAFKA_GROUP_ID || 'portfolio-consumers' });
-const TOPIC = process.env.KAFKA_TOPIC || 'trades';
+const topic = process.env.KAFKA_TRADES_TOPIC || process.env.KAFKA_TOPIC || 'trades';
+const groupId = process.env.KAFKA_GROUP_ID || 'portfolio-consumers';
 
-async function processTrade(client, trade) {
-  // Idempotency
-  const { rows } = await client.query('select processed_at, symbol, qty, price, trade_time from trades where id = $1 for update', [trade.id]);
-  if (rows.length === 0) throw new Error(`Trade not found: ${trade.id}`);
-  if (rows[0].processed_at) return; // already processed
+(async () => {
+  const consumer = kafka.consumer({ groupId });
+  try {
+    await consumer.connect();
+    await consumer.subscribe({ topic, fromBeginning: false });
 
-  const symbol = rows[0].symbol;
-  const qty = Number(rows[0].qty);
-  const price = Number(rows[0].price);
-  const tradeTime = rows[0].trade_time;
+    console.log(`Worker connected to Kafka. Consuming topic "${topic}"...`);
 
-  if (qty > 0) {
-    // BUY -> create lot
-    await client.query(`
-      insert into lots (symbol, buy_trade_id, qty_initial, qty_open, price, created_at)
-      values ($1, $2, $3, $3, $4, $5)
-    `, [symbol, trade.id, qty, price, tradeTime]);
-  } else {
-    // SELL -> close lots FIFO
-    let remaining = -qty; // positive number to close
-    // Lock open lots for this symbol in FIFO order
-    const lotsRes = await client.query(`
-      select id, qty_open::numeric, price::numeric
-      from lots
-      where symbol = $1 and qty_open > 0
-      order by id asc
-      for update
-    `, [symbol]);
+    await consumer.run({
+      eachMessage: async ({ message }) => {
+        const value = message.value?.toString();
+        if (!value) return;
 
-    let totalPnl = 0;
-    for (const lot of lotsRes.rows) {
-      if (remaining <= 0) break;
-      const lotOpen = Number(lot.qty_open);
-      if (lotOpen <= 0) continue;
+        const trade = JSON.parse(value); // { id, symbol, qty, price, ts }
 
-      const matchQty = Math.min(lotOpen, remaining);
-      const pnl = (price - Number(lot.price)) * matchQty;
-
-      await client.query(`
-        insert into lot_fills (lot_id, sell_trade_id, symbol, qty, buy_price, sell_price, pnl)
-        values ($1, $2, $3, $4, $5, $6, $7)
-      `, [lot.id, trade.id, symbol, matchQty, Number(lot.price), price, pnl]);
-
-      await client.query(`
-        update lots set qty_open = qty_open - $1 where id = $2
-      `, [matchQty, lot.id]);
-
-      totalPnl += pnl;
-      remaining -= matchQty;
-    }
-
-    if (remaining > 0) {
-      // Not enough to sell -> reject this trade processing
-      throw new Error(`Insufficient open quantity for ${symbol}. Remaining: ${remaining}`);
-    }
-
-    // Upsert realized PnL
-    await client.query(`
-      insert into realized_pnl_by_symbol (symbol, realized_qty, realized_pnl, last_sell_trade_time)
-      values ($1, $2, $3, $4)
-      on conflict (symbol) do update set
-        realized_qty = realized_pnl_by_symbol.realized_qty + EXCLUDED.realized_qty,
-        realized_pnl = realized_pnl_by_symbol.realized_pnl + EXCLUDED.realized_pnl,
-        last_sell_trade_time = greatest(realized_pnl_by_symbol.last_sell_trade_time, EXCLUDED.last_sell_trade_time)
-    `, [symbol, -qty, totalPnl, tradeTime]);
-  }
-
-  await client.query('update trades set processed_at = now() where id = $1', [trade.id]);
-}
-
-async function run() {
-  await consumer.connect();
-  await consumer.subscribe({ topic: TOPIC, fromBeginning: false });
-  console.log('Worker consuming from topic:', TOPIC);
-
-  await consumer.run({
-    // Each message processed in-order within a partition (keyed by symbol)
-    eachMessage: async ({ message }) => {
-      const value = message.value?.toString();
-      if (!value) return;
-      const trade = JSON.parse(value);
-
-      const client = await pool.connect();
-      try {
-        await client.query('begin');
-        await processTrade(client, trade);
-        await client.query('commit');
-      } catch (e) {
-        await client.query('rollback');
-        console.error('Trade processing failed:', e.message);
-        // In case of failure, the trade remains unprocessed; adjust strategy as needed (DLQ etc.)
-      } finally {
-        client.release();
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          if (Number(trade.qty) > 0) {
+            await processBuy(client, trade);
+          } else if (Number(trade.qty) < 0) {
+            await processSell(client, trade);
+          }
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('Worker FIFO error:', err.message);
+        } finally {
+          client.release();
+        }
       }
-    }
-  });
-}
-run().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+    });
+  } catch (e) {
+    // If Kafka is unreachable in cloud and you don’t want restarts, exit(0)
+    console.error('Worker failed to connect to Kafka:', e.message);
+    process.exit(0);
+  }
+})();

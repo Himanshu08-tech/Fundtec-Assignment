@@ -242,7 +242,7 @@ async function processTradeDirect(trade) {
   }
 }
 
-app.post('/api/trades', async (req, res) => {
+app.post('/trades', async (req, res) => {
   try {
     const parsed = TradeSchema.parse(req.body);
     const symbol = parsed.symbol.trim().toUpperCase();

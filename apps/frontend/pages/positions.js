@@ -123,14 +123,14 @@ export default function Positions() {
                       </thead>
                       <tbody>
                         {p.open_lots.map(l => (
-                          <tr key={l.lot_id} style={styles.tableRow}>
+                          <tr key={l.buy_lot_id} style={styles.tableRow}>
                             <td style={styles.lotIdCell}>
-                              <span style={styles.lotIdBadge}>#{l.lot_id}</span>
+                              <span style={styles.lotIdBadge}>#{l.buy_lot_id}</span>
                             </td>
-                            <td style={styles.td}>{l.qty_open}</td>
+                            <td style={styles.td}>{l.remaining_qty}</td>
                             <td style={styles.priceCell}>{formatCurrency(l.price)}</td>
                             <td style={styles.valueCell}>
-                              {formatCurrency(l.qty_open * l.price)}
+                              {formatCurrency(l.remaining_qty * l.price)}
                             </td>
                           </tr>
                         ))}

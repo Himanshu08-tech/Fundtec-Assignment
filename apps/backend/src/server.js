@@ -291,8 +291,83 @@ app.post('/trades', async (req, res) => {
 
 // Keep your existing /api/positions and /api/pnl routes
 
+// GET /positions -> open lots + avg cost
+app.get('/positions', async (_req, res) => {
+  try {
+    const agg = await pool.query(`
+      select
+        symbol,
+        sum(qty_open)::text as total_qty_open,
+        case when sum(qty_open) = 0 then null
+             else (sum(qty_open * price) / sum(qty_open))::text
+        end as avg_cost
+      from lots
+      where qty_open > 0
+      group by symbol
+      order by symbol
+    `);
+
+    const details = await pool.query(`
+      select symbol, id as lot_id, qty_open::text as qty_open, price::text as price
+      from lots
+      where qty_open > 0
+      order by symbol, id
+    `);
+
+    const lotsBySymbol = details.rows.reduce((acc, r) => {
+      acc[r.symbol] = acc[r.symbol] || [];
+      acc[r.symbol].push({
+        lot_id: r.lot_id,
+        qty_open: Number(r.qty_open),
+        price: Number(r.price)
+      });
+      return acc;
+    }, {});
+
+    const positions = agg.rows.map(r => ({
+      symbol: r.symbol,
+      total_qty_open: Number(r.total_qty_open),
+      avg_cost: r.avg_cost ? Number(r.avg_cost) : null,
+      open_lots: lotsBySymbol[r.symbol] || []
+    }));
+
+    res.json({ positions });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /pnl -> realized P&L summary
+app.get('/pnl', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      select
+        symbol,
+        realized_qty::text as realized_qty,
+        realized_pnl::text as realized_pnl,
+        last_sell_trade_time
+      from realized_pnl_by_symbol
+      order by symbol
+    `);
+    res.json({
+      realized: rows.map(r => ({
+        symbol: r.symbol,
+        realized_qty: Number(r.realized_qty),
+        realized_pnl: Number(r.realized_pnl),
+        last_sell_trade_time: r.last_sell_trade_time
+      }))
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
 const PORT = process.env.PORT || 4000;
 (async () => {
   kafkaConnected = await initKafka();
   app.listen(PORT, () => console.log(`Backend listening on http://localhost:${PORT}`));
 })();
+

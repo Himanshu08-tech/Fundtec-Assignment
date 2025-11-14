@@ -1,4 +1,3 @@
--- Enable UUID in Node; we pass UUID from app. No DB extension required.
 
 create table if not exists trades (
   id uuid primary key,

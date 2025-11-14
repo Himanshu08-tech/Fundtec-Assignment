@@ -297,28 +297,28 @@ app.get('/positions', async (_req, res) => {
     const agg = await pool.query(`
       select
         symbol,
-        sum(qty_open)::text as total_qty_open,
-        case when sum(qty_open) = 0 then null
-             else (sum(qty_open * price) / sum(qty_open))::text
+        sum(remaining_qty)::text as total_qty_open,
+        case when sum(remaining_qty) = 0 then null
+             else (sum(remaining_qty * price) / sum(remaining_qty))::text
         end as avg_cost
       from lots
-      where qty_open > 0
+      where remaining_qty > 0
       group by symbol
       order by symbol
     `);
 
     const details = await pool.query(`
-      select symbol, id as lot_id, qty_open::text as qty_open, price::text as price
+      select symbol, id as buy_lot_id, remaining_qty::text as remaining_qty, price::text as price
       from lots
-      where qty_open > 0
+      where remaining_qty > 0
       order by symbol, id
     `);
 
     const lotsBySymbol = details.rows.reduce((acc, r) => {
       acc[r.symbol] = acc[r.symbol] || [];
       acc[r.symbol].push({
-        lot_id: r.lot_id,
-        qty_open: Number(r.qty_open),
+        buy_lot_id: r.buy_lot_id,
+        remaining_qty: Number(r.remaining_qty),
         price: Number(r.price)
       });
       return acc;

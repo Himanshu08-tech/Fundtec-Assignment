@@ -172,6 +172,5 @@ On success, sets processed_at = now()
 
 
 Deployment link:
-Fe: https://fundtec-assignment-r6nq.vercel.app/
-Be: https://fundtec-assignment-backend.onrender.com
-Database : https://supabase.com/dashboard/project/gfrxrcyoroypxowlrzcp/sql/61b5cceb-35a7-4ba3-b63c-abf81a306bf8
+Fe: https://fundtec-assignment-4yg1.vercel.app
+
